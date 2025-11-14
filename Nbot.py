@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import os  # <-- নতুন ইমপোর্ট
+import threading  # <-- নতুন ইমপোর্ট
+from flask import Flask  # <-- নতুন ইমপোর্ট
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
@@ -13,37 +16,51 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import Dict, List, Optional
 
-# --- ধ্রুবক (Constants) ---
-BOT_TOKEN = "8301872319:AAHX_ZZeECEd92WoGV5dOpCAgsR6oIsiIrE"  # আপনার বট টোকেন
-ADMIN_ID = 8308179143  # অ্যাডমিন আইডি (Integer)
-ADMIN_USERNAME = "Sujay_X"  # সাপোর্ট বাটনের জন্য
+# --- ⚠️ পরিবর্তন: টোকেন এবং আইডি Environment Variables থেকে লোড করা হচ্ছে ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID_STR = os.environ.get("ADMIN_ID")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME")
 
-# --- ⚠️ পরিবর্তন: ইন-মেমরি ডাটাবেস ---
+# চেক করা হচ্ছে যে ভেরিয়েবলগুলো সেট করা আছে কিনা
+if not BOT_TOKEN:
+    logging.critical("CRITICAL ERROR: BOT_TOKEN is not set in environment variables!")
+    exit()
+if not ADMIN_ID_STR:
+    logging.critical("CRITICAL ERROR: ADMIN_ID is not set in environment variables!")
+    exit()
+if not ADMIN_USERNAME:
+    logging.critical("CRITICAL ERROR: ADMIN_USERNAME is not set in environment variables!")
+    exit()
+
+try:
+    ADMIN_ID = int(ADMIN_ID_STR)
+except ValueError:
+    logging.critical(f"CRITICAL ERROR: ADMIN_ID '{ADMIN_ID_STR}' is not a valid integer!")
+    exit()
+# -----------------------------------------------------------------
+
+# --- ইন-মেমরি ডাটাবেস ---
 mock_db: Dict = {
     "services": {},
     "settings": {
-        "num_limit": 7  # ডিফল্ট নম্বর লিমিট
+        "num_limit": 7
     }
 }
 
-# --- ⚠️ পরিবর্তন: FSM স্টেটস ---
+# --- FSM স্টেটস (States) ---
 class AdminStates(StatesGroup):
     add_service_name = State()
-    
     add_country_select_service = State()
     add_country_name = State()
-
     add_number_select_service = State()
     add_number_select_country = State()
     add_number_method_choice = State()  
     add_number_input_text = State()     
     add_number_input_file = State()     
-    
     remove_service_select = State()
     remove_country_select_service = State()
     remove_country_select = State()
-    
-    set_num_limit = State() # <-- নতুন স্টেট
+    set_num_limit = State()
 
 class UserStates(StatesGroup):
     get_number_select_service = State()
@@ -71,12 +88,11 @@ dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
 
-# --- ⚠️ পরিবর্তন: রিপ্লাই কীবোর্ড (প্রধান মেনু) ---
-# 'Num Limit' বাটন যোগ করা হয়েছে
+# --- রিপ্লাই কীবোর্ড (প্রধান মেনু) ---
 admin_buttons = [
     [KeyboardButton(text="➕ Add Number"), KeyboardButton(text="⚙️ Add Service")],
     [KeyboardButton(text="🗑️ Remove Service"), KeyboardButton(text="🌍 Add country")],
-    [KeyboardButton(text="❌ Remove country"), KeyboardButton(text="Num Limit")], # <-- নতুন বাটন
+    [KeyboardButton(text="❌ Remove country"), KeyboardButton(text="Num Limit")],
     [KeyboardButton(text="🔢 Get Number"), KeyboardButton(text="🆘 Support")],
     [KeyboardButton(text="🔙 Cancel Operation")]
 ]
@@ -389,7 +405,7 @@ async def admin_remove_country_selected(query: CallbackQuery, callback_data: Cou
     await query.answer()
 
 
-# --- ⚠️ নতুন: ৬. ADMIN: Set Num Limit ---
+# --- ৬. ADMIN: Set Num Limit ---
 @dp.message(F.text == "Num Limit", StateFilter(None))
 async def handle_num_limit_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -420,7 +436,7 @@ async def handle_num_limit_input(message: Message, state: FSMContext):
         await message.answer(f"একটি ত্রুটি ঘটেছে: {e}")
 
 
-# --- ৭. USER/ADMIN: Get Number (সম্পূর্ণ পরিবর্তিত) ---
+# --- ৭. USER/ADMIN: Get Number ---
 @dp.message(F.text == "🔢 Get Number", StateFilter(None))
 async def user_get_number_start(message: Message, state: FSMContext):
     await state.set_state(UserStates.get_number_select_service)
@@ -442,38 +458,25 @@ async def user_get_number_service_selected(query: CallbackQuery, callback_data: 
 
 @dp.callback_query(CountryCallback.filter(F.action == "select_for_get"), UserStates.get_number_select_country)
 async def user_get_number_country_selected(query: CallbackQuery, callback_data: CountryCallback, state: FSMContext):
-    # 'page' স্টেট আর সেট করা হচ্ছে না
     await state.update_data(
         service_name=callback_data.service_name, 
         country_name=callback_data.country_name
     )
     await state.set_state(UserStates.get_number_display)
-    # প্রথমবার নম্বর দেখানোর জন্য কল করা হচ্ছে
     await show_numbers_page(query.message, state, edit=False)
     await query.answer()
 
 async def show_numbers_page(message: Message, state: FSMContext, edit: bool = True):
-    """
-    নম্বর দেখানোর এবং ডাটাবেস থেকে রিমুভ করার প্রধান ফাংশন।
-    """
     data = await state.get_data()
-    service = data.get("service_name")
-    country = data.get("country_name")
-    
+    service = data.get("service_name"); country = data.get("country_name")
     if not service or not country:
         await state.clear(); await message.answer("কিছু একটা ভুল হয়েছে। /start দিন।"); return
-
     try:
-        # বর্তমান লিমিট DB থেকে নেওয়া হলো
         per_page = mock_db["settings"]["num_limit"]
-        
         all_numbers = mock_db["services"].get(service, {}).get(country, [])
-        
-        # দেখানোর জন্য নম্বরগুলি স্লাইস করা হলো (প্রথম 'per_page' টি)
         numbers_to_show = all_numbers[:per_page]
         
         text = f"<b>সার্ভিস: {service}</b>\n"
-        
         if not numbers_to_show:
             text += f"\n<b>দেশ: {country}</b>\n\n🚫 এই দেশের জন্য আর কোনো নম্বর নেই।"
         else:
@@ -481,22 +484,15 @@ async def show_numbers_page(message: Message, state: FSMContext, edit: bool = Tr
             for num in numbers_to_show:
                 text += f"📞 <b>{country} WS Number Assigned:</b>\n<code>{num}</code>\n"
                 text += "Waiting for OTP...\n\n"
-            
-            # --- ⚠️ মূল পরিবর্তন: নম্বর রিমুভ করা ---
-            # যে নম্বরগুলি দেখানো হলো, সেগুলি DB থেকে রিমুভ করা হচ্ছে
             mock_db["services"][service][country] = all_numbers[per_page:]
             logging.info(f"Gave {len(numbers_to_show)} numbers for {service}/{country}. {len(mock_db['services'][service][country])} remain.")
-
         
         builder = InlineKeyboardBuilder()
-        
-        # রিমুভ করার পর, যদি আরও নম্বর বাকি থাকে, তবেই 'Refresh' বাটন দেখানো হবে
         if len(mock_db["services"][service][country]) > 0:
             builder.row(InlineKeyboardButton(text=f"🔄 Refresh (Get Next {per_page})", callback_data=NavCallback(action="refresh").pack()))
         else:
-            if len(numbers_to_show) > 0: # যদি এইমাত্র শেষ ব্যাচটি দেওয়া হয়
+            if len(numbers_to_show) > 0:
                  builder.row(InlineKeyboardButton(text="🚫 আর নম্বর নেই", callback_data="none"))
-            # যদি শুরুতেই কোনো নম্বর না থাকে
             elif len(all_numbers) == 0: 
                  builder.row(InlineKeyboardButton(text="🚫 কোনো নম্বর নেই", callback_data="none"))
 
@@ -505,7 +501,6 @@ async def show_numbers_page(message: Message, state: FSMContext, edit: bool = Tr
             InlineKeyboardButton(text="⚙️ Change Service", callback_data=NavCallback(action="change_service").pack())
         )
         builder.row(InlineKeyboardButton(text="🔙 Back to Main Menu", callback_data="cancel_fsm"))
-
         if edit:
             try: await message.edit_text(text, reply_markup=builder.as_markup())
             except Exception as e: logging.warning(f"Could not edit message: {e}")
@@ -519,10 +514,6 @@ async def show_numbers_page(message: Message, state: FSMContext, edit: bool = Tr
 
 @dp.callback_query(NavCallback.filter(F.action == "refresh"), UserStates.get_number_display)
 async def handle_refresh_numbers(query: CallbackQuery, state: FSMContext):
-    """
-    'Refresh' বাটন: পেজ পরিবর্তন না করে, শুধু show_numbers_page কে আবার কল করে।
-    এটি পরবর্তী ব্যাচের নম্বর দেখাবে এবং রিমুভ করবে।
-    """
     await show_numbers_page(query.message, state, edit=True)
     await query.answer()
 
@@ -571,7 +562,6 @@ async def handle_back_button(query: CallbackQuery, callback_data: NavCallback, s
     service_name = data.get("service_name")
     country_name = data.get("country_name") 
 
-    # Back from text/file input -> method choice
     if current_state_str in [AdminStates.add_number_input_text.state, AdminStates.add_number_input_file.state]:
         await state.set_state(AdminStates.add_number_method_choice)
         method_keyboard = InlineKeyboardBuilder()
@@ -583,16 +573,12 @@ async def handle_back_button(query: CallbackQuery, callback_data: NavCallback, s
             "আপনি কিভাবে নম্বর যোগ করতে চান? (টেক্সট বা ফাইল)",
             reply_markup=method_keyboard.as_markup()
         )
-
-    # Back from method choice -> country select
     elif current_state_str == AdminStates.add_number_method_choice.state:
         await state.set_state(AdminStates.add_number_select_country)
         await query.message.edit_text(
             f"সার্ভিস: {service_name}\n\nকোন দেশে নম্বর যোগ করতে চান?",
             reply_markup=get_countries_keyboard(service_name, action_prefix="select_for_add_num")
         )
-    
-    # Back from country select (etc) -> service select
     elif current_state_str in [
         AdminStates.add_country_name.state,
         AdminStates.add_number_select_country.state,
@@ -605,7 +591,7 @@ async def handle_back_button(query: CallbackQuery, callback_data: NavCallback, s
              new_state, action = AdminStates.add_country_select_service, "select_for_add_country"
         elif current_state_str == AdminStates.remove_country_select.state:
              new_state, action = AdminStates.remove_country_select_service, "select_for_remove_country"
-        else: # AdminStates:add_number_select_country
+        else:
              new_state, action = AdminStates.add_number_select_service, "select_for_add_num"
         
         await state.set_state(new_state)
@@ -613,7 +599,6 @@ async def handle_back_button(query: CallbackQuery, callback_data: NavCallback, s
             "কোন সার্ভিসে কাজ করতে চান?",
             reply_markup=get_services_keyboard(action_prefix=action)
         )
-    
     else:
         await state.clear()
         await query.message.edit_text("অপারেশন বাতিল করা হয়েছে।")
@@ -626,10 +611,34 @@ async def handle_none_callback(query: CallbackQuery):
     await query.answer("এই বাটনে কোনো কাজ নেই।")
 
 
-# --- বট চালু করার প্রধান ফাংশন ---
-async def main():
-    logging.info("বট চালু হচ্ছে...")
+# --- ⚠️ নতুন: Flask সার্ভার এবং বট থ্রেড চালু করা ---
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    """Render-এর হেলথ চেকের জন্য একটি সিম্পল রুট।"""
+    return "Bot is running!"
+
+async def main_polling():
+    """বটের পোলিং শুরু করার প্রধান async ফাংশন।"""
+    logging.info("Bot polling is starting...")
+    # কোনো পেন্ডিং আপডেট থাকলে তা বাদ দেওয়া
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def run_bot_polling():
+    """বটকে একটি নতুন ইভেন্ট লুপে চালানোর জন্য।"""
+    try:
+        asyncio.run(main_polling())
+    except Exception as e:
+        logging.critical(f"Bot polling critical error: {e}", exc_info=True)
+
+# বট পোলিংকে একটি আলাদা থ্রেডে চালু করা
+# এটি Flask সার্ভারকে ব্লক করা থেকে বিরত রাখে
+polling_thread = threading.Thread(target=run_bot_polling)
+polling_thread.daemon = True  # মেইন থ্রেড বন্ধ হলে এটিও বন্ধ হবে
+polling_thread.start()
+
+# Gunicorn এই 'app' অবজেক্টটি খুঁজে পাবে এবং রান করবে
+# 'if __name__ == "__main__":' ব্লকের আর প্রয়োজন নেই কারণ Gunicorn এটি হ্যান্ডেল করছে।
