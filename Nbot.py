@@ -1,6 +1,8 @@
 import asyncio
 import logging
-import os  # <-- এটি থাকবে
+import os
+import threading  # <-- থ্রেডিং আবার যোগ করা হয়েছে
+from flask import Flask  # <-- Flask আবার যোগ করা হয়েছে
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.filters.callback_data import CallbackData
@@ -18,6 +20,8 @@ from typing import Dict, List, Optional
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID_STR = os.environ.get("ADMIN_ID")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME")
+# --- ⚠️ নতুন: Render-এর দেওয়া PORT লোড করা ---
+RENDER_PORT = int(os.environ.get('PORT', 10000)) # ডিফল্ট 10000
 
 # চেক করা হচ্ছে
 if not BOT_TOKEN or not ADMIN_ID_STR or not ADMIN_USERNAME:
@@ -77,6 +81,7 @@ dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
 # --- রিপ্লাই কীবোর্ড (প্রধান মেনু) ---
+# ... (আপনার কীবোর্ডের কোড এখানে থাকবে, কোনো পরিবর্তন নেই) ...
 admin_buttons = [
     [KeyboardButton(text="➕ Add Number"), KeyboardButton(text="⚙️ Add Service")],
     [KeyboardButton(text="🗑️ Remove Service"), KeyboardButton(text="🌍 Add country")],
@@ -90,6 +95,7 @@ user_buttons = [
     [KeyboardButton(text="🔙 Cancel Operation")]
 ]
 user_keyboard = ReplyKeyboardMarkup(keyboard=user_buttons, resize_keyboard=True, input_field_placeholder="Select an option...")
+
 
 # --- Helper Function: সার্ভিস কীবোর্ড ---
 def get_services_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
@@ -347,17 +353,39 @@ async def handle_back_button(query: CallbackQuery, callback_data: NavCallback, s
 async def handle_none_callback(query: CallbackQuery):
     await query.answer("এই বাটনে কোনো কাজ নেই।")
 
-# --- ⚠️ পরিবর্তন: বট চালু করার নতুন উপায় ---
-async def main():
-    """বট শুরু করার প্রধান ফাংশন।"""
+
+# --- ⚠️ নতুন: Flask সার্ভারকে থ্রেডে চালু করা ---
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    """Render-এর হেলথ চেকের জন্য একটি সিম্পল রুট।"""
+    return "Bot is alive!"
+
+def run_flask():
+    """Flask সার্ভারকে একটি আলাদা থ্রেডে চালানোর জন্য।"""
+    # Gunicorn-এর বদলে Flask-এর নিজস্ব সার্ভার ব্যবহার করা হচ্ছে
+    # এটি Render-এর দেওয়া $PORT-এ চলবে
+    app.run(host='0.0.0.0', port=RENDER_PORT)
+
+# --- ⚠️ নতুন: বটকে Main Thread-এ চালু করা ---
+async def main_polling():
+    """বটের পোলিং শুরু করার প্রধান async ফাংশন।"""
     logging.info("বট পোলিং শুরু হচ্ছে...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    # Flask বা Threading ছাড়াই সরাসরি বট চালু করা
+    # Flask সার্ভারকে একটি আলাদা থ্রেডে চালু করা
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # টেলিগ্রাম বটকে প্রধান থ্রেডে (Main Thread) চালু করা
+    # এটি 'set_wakeup_fd' error-এর সমাধান করবে
     try:
-        asyncio.run(main())
+        logging.info("Flask সার্ভার একটি আলাদা থ্রেডে চালু হয়েছে...")
+        asyncio.run(main_polling())
     except (KeyboardInterrupt, SystemExit):
         logging.info("বট বন্ধ করা হলো।")
     except Exception as e:
